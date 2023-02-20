@@ -17,6 +17,8 @@ const PRODUCT_PRICE_CLASS: &str = ".vioxXd.rVLWG6";
 
 const PRODUCT_URL_SELECTOR: &str = "a[data-sqe='link']";
 
+const PAGE_CONTROLLSER_CLASS: &str = ".shopee-page-controller";
+
 #[derive(Serialize, Deserialize)]
 pub struct ValidProduct {
     name: String,
@@ -30,7 +32,10 @@ pub async fn start_scrape(
     config: Vec<ShopConfig>,
 ) -> Result<Vec<ValidProduct>, Box<dyn Error>> {
     // Make window fullscreen
-    c.fullscreen_window().await?;
+    match c.fullscreen_window().await {
+        Ok(_) => (),
+        Err(err) => panic!("Failed to make window fullscreen {:?}", err),
+    };
 
     // Go to shopee and click the language button
     match c.goto("https://shopee.com.my").await {
@@ -64,7 +69,11 @@ pub async fn start_scrape(
         // Construct URL instance for current shop
         let url = match Url::parse_with_params(
             "https://shopee.com.my/search",
-            [("keyword", "graphics card"), ("shop", &shop.shop_id)],
+            [
+                ("keyword", "graphics card"),
+                ("shop", &shop.shop_id),
+                ("page", "0"),
+            ],
         ) {
             Ok(url) => url,
             Err(err) => {
@@ -100,7 +109,10 @@ pub async fn start_scrape(
             }
         };
 
-        // Find all product cards on the page
+        /* Find all product cards on the page
+        At this point, there will be product cards,
+        but there will be no text on them, no pricing, no product name.
+        As the content of these cards are lazy loaded when they comes into view. */
         let products = match c.find_all(Locator::Css(PRODUCT_CARD_CLASS)).await {
             Ok(cards) => cards,
             Err(err) => {
@@ -112,16 +124,21 @@ pub async fn start_scrape(
             }
         };
 
-        // Scroll the pages to the bottom,
-        // 50 times should be long enough
+        /* Scroll the page to the bottom,
+        50 times should be long enough,
+        calling window.scrollByPages should
+        be enough to get to the absolute bottom.
+        This is to trigger the lazy loading of the card content,
+        so the product name and price gets loaded by the web app. */
         for _i in 1..50 {
             // println!("Scrolling into page {:?}", i);
             c.execute("window.scrollByPages(1)", vec![]).await?;
             thread::sleep(Duration::from_millis(20));
             // println!("Res {:?}", res);
         }
-        // Execute javascript that retrieve all
-        // product card on the page
+
+        /* Execute javascript that retrieve all
+        product card on the page */
         // let _res = c
         //     .execute("return document.querySelectorAll('.Cve6sh').length", vec![])
         //     .await?;
@@ -229,12 +246,88 @@ pub async fn start_scrape(
             });
         }
 
+        let page_controller_selector = match Selector::parse(PAGE_CONTROLLSER_CLASS) {
+            Ok(selector) => selector,
+            Err(err) => {
+                eprintln!(
+                    "Error constructing CSS selector to find page controller in shop {} {:?}",
+                    shop.shop_name, err
+                );
+                continue;
+            }
+        };
+
+        let page_controller_button_selector = match Selector::parse("button") {
+            Ok(selector) => selector,
+            Err(err) => {
+                eprintln!(
+                    "Error constructing CSS selector to find page button in shop {} {:?}",
+                    shop.shop_name, err
+                );
+                continue;
+            }
+        };
+
+        let page_controller_element = match c.find(Locator::Css(PAGE_CONTROLLSER_CLASS)).await {
+            Ok(elem) => elem,
+            Err(err) => {
+                eprintln!(
+                    "Error finding page controller element for shop {} {:?}",
+                    shop.shop_name, err
+                );
+                continue;
+            }
+        };
+
+        let raw_html = match page_controller_element.html(false).await {
+            Ok(raw_html) => raw_html,
+            Err(err) => {
+                eprintln!(
+                    "Error getting HTML of page controller element for shop {} {:?}",
+                    shop.shop_name, err
+                );
+                continue;
+            }
+        };
+
+        let page_controller_element = Html::parse_fragment(&raw_html);
+
+        let page_controller_element = page_controller_element
+            .select(&page_controller_selector)
+            .next();
+
+        let page_controller_bar = match page_controller_element {
+            Some(elem) => elem,
+            None => continue,
+        };
+
+        let mut btn_arr: Vec<i32> = vec![];
+
+        for elem in page_controller_bar.select(&page_controller_button_selector) {
+            let num = match elem.text().next() {
+                Some(txt) => txt,
+                None => {
+                    eprintln!("Error getting text from button");
+                    continue;
+                }
+            };
+            let num: i32 = match num.to_string().parse() {
+                Ok(num) => num,
+                Err(_err) => {
+                    continue;
+                }
+            };
+            btn_arr.push(num);
+        }
+
+        // Get page numbers
         println!(
-            "Valid product: {}\nName not found: {}\nPrice not found: {}\nURL not found: {}\n\n",
+            "Valid product: {}\nName not found: {}\nPrice not found: {}\nURL not found: {}\nPages: {:?} \n\n",
             valid_product_count,
             class_name_not_found_total,
             class_price_not_found_total,
-            class_url_not_found_total
+            class_url_not_found_total,
+            btn_arr
         );
     }
 
